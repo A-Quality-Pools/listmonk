@@ -677,9 +677,10 @@ func (m *CampaignMessage) render() error {
 	}
 
 	if m.Campaign.TemplateType == models.TemplateTypeMJML {
+		newOut := bytes.Buffer{}
 		mjml := exec.Command("mjml", "-i", "-s")
 		mjml.Stdin = &out
-		mjml.Stdout = &out
+		mjml.Stdout = &newOut
 		errBuf := bytes.Buffer{}
 		mjml.Stderr = &errBuf
 		err := mjml.Run()
@@ -689,6 +690,7 @@ func (m *CampaignMessage) render() error {
 		if errBuf.Len() > 0 {
 			return errors.New(errBuf.String())
 		}
+		out = newOut
 	}
 
 	m.body = out.Bytes()
