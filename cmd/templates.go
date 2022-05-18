@@ -136,7 +136,6 @@ func handleCreateTemplate(c echo.Context) error {
 	}
 
 	// Insert and read ID.
-	var newID int
 	out, err := app.core.CreateTemplate(o.Name, []byte(o.Body), o.Type)
 	if err != nil {
 		return err
