@@ -60,7 +60,7 @@
                   <div class="column is-6">
                     <ul class="no has-text-grey">
                       <li v-for="(num, status) in counts.campaigns.byStatus" :key="status">
-                        <label>{{ num }}</label>
+                        <label :data-cy="`campaigns-${status}`">{{ num }}</label>
                         {{ $t(`campaigns.status.${status}`) }}
                         <span v-if="status === 'running'" class="spinner is-tiny">
                           <b-loading :is-full-page="false" active />
@@ -218,7 +218,7 @@ export default Vue.extend({
     // Pull the charts.
     this.$api.getDashboardCharts().then((data) => {
       this.isChartsLoading = false;
-      this.renderChart(this.$t('dashboard.linkClicks'), data.campaignViews, this.$refs['chart-views']);
+      this.renderChart(this.$t('dashboard.campaignViews'), data.campaignViews, this.$refs['chart-views']);
       this.renderChart(this.$t('dashboard.linkClicks'), data.linkClicks, this.$refs['chart-clicks']);
     });
   },

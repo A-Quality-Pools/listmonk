@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	"github.com/knadh/listmonk/models"
-	"github.com/labstack/echo"
+	"github.com/labstack/echo/v4"
 )
 
 const (
@@ -36,33 +36,24 @@ var (
 func handleGetTemplates(c echo.Context) error {
 	var (
 		app = c.Get("app").(*App)
-		out []models.Template
 
 		id, _     = strconv.Atoi(c.Param("id"))
-		single    = false
 		noBody, _ = strconv.ParseBool(c.QueryParam("no_body"))
 	)
 
 	// Fetch one list.
 	if id > 0 {
-		single = true
+		out, err := app.core.GetTemplate(id, noBody)
+		if err != nil {
+			return err
+		}
+
+		return c.JSON(http.StatusOK, okResp{out})
 	}
 
-	err := app.queries.GetTemplates.Select(&out, id, noBody)
+	out, err := app.core.GetTemplates(noBody)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorFetching",
-				"name", "{globals.terms.templates}", "error", pqErrMsg(err)))
-	}
-	if single && len(out) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest,
-			app.i18n.Ts("globals.messages.notFound", "name", "{globals.terms.template}"))
-	}
-
-	if len(out) == 0 {
-		return c.JSON(http.StatusOK, okResp{[]struct{}{}})
-	} else if single {
-		return c.JSON(http.StatusOK, okResp{out[0]})
+		return err
 	}
 
 	return c.JSON(http.StatusOK, okResp{out})
@@ -75,8 +66,6 @@ func handlePreviewTemplate(c echo.Context) error {
 		id, _        = strconv.Atoi(c.Param("id"))
 		body         = c.FormValue("body")
 		templateType = c.FormValue("content_type")
-
-		tpls []models.Template
 	)
 
 	if body != "" {
@@ -89,19 +78,13 @@ func handlePreviewTemplate(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidID"))
 		}
 
-		err := app.queries.GetTemplates.Select(&tpls, id, false)
+		tpl, err := app.core.GetTemplate(id, false)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError,
-				app.i18n.Ts("globals.messages.errorFetching",
-					"name", "{globals.terms.templates}", "error", pqErrMsg(err)))
+			return err
 		}
 
-		if len(tpls) == 0 {
-			return echo.NewHTTPError(http.StatusBadRequest,
-				app.i18n.Ts("globals.messages.notFound", "name", "{globals.terms.template}"))
-		}
-		body = tpls[0].Body
-		templateType = tpls[0].Type
+		body = tpl.Body
+		templateType = tpl.Type
 	}
 
 	// Compile the template.
@@ -154,19 +137,13 @@ func handleCreateTemplate(c echo.Context) error {
 
 	// Insert and read ID.
 	var newID int
-	if err := app.queries.CreateTemplate.Get(&newID,
-		o.Name,
-		o.Body,
-		o.Type); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorCreating",
-				"name", "{globals.terms.template}", "error", pqErrMsg(err)))
+	out, err := app.core.CreateTemplate(o.Name, []byte(o.Body), o.Type)
+	if err != nil {
+		return err
 	}
 
-	// Hand over to the GET handler to return the last insertion.
-	return handleGetTemplates(copyEchoCtx(c, map[string]string{
-		"id": fmt.Sprintf("%d", newID),
-	}))
+	return c.JSON(http.StatusOK, okResp{out})
+
 }
 
 // handleUpdateTemplate handles template modification.
@@ -189,19 +166,13 @@ func handleUpdateTemplate(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
-	res, err := app.queries.UpdateTemplate.Exec(id, o.Name, o.Body, o.Type)
+	out, err := app.core.UpdateTemplate(id, o.Name, []byte(o.Body), o.Type)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorUpdating",
-				"name", "{globals.terms.template}", "error", pqErrMsg(err)))
+		return err
 	}
 
-	if n, _ := res.RowsAffected(); n == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest,
-			app.i18n.Ts("globals.messages.notFound", "name", "{globals.terms.template}"))
-	}
+	return c.JSON(http.StatusOK, okResp{out})
 
-	return handleGetTemplates(c)
 }
 
 // handleTemplateSetDefault handles template modification.
@@ -215,11 +186,8 @@ func handleTemplateSetDefault(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidID"))
 	}
 
-	_, err := app.queries.SetDefaultTemplate.Exec(id)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorUpdating",
-				"name", "{globals.terms.template}", "error", pqErrMsg(err)))
+	if err := app.core.SetDefaultTemplate(id); err != nil {
+		return err
 	}
 
 	return handleGetTemplates(c)
@@ -236,16 +204,8 @@ func handleDeleteTemplate(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidID"))
 	}
 
-	var delID int
-	err := app.queries.DeleteTemplate.Get(&delID, id)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorDeleting",
-				"name", "{globals.terms.template}", "error", pqErrMsg(err)))
-	}
-	if delID == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest,
-			app.i18n.T("templates.cantDeleteDefault"))
+	if err := app.core.DeleteTemplate(id); err != nil {
+		return err
 	}
 
 	return c.JSON(http.StatusOK, okResp{true})

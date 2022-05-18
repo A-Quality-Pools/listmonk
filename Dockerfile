@@ -1,5 +1,5 @@
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates nodejs npm
+RUN apk --no-cache add ca-certificates nodejs npm tzdata
 RUN npm install -g mjml
 WORKDIR /listmonk
 COPY listmonk .

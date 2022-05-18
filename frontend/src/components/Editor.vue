@@ -105,6 +105,7 @@ import 'tinymce';
 import 'tinymce/icons/default';
 import 'tinymce/themes/silver';
 import 'tinymce/skins/ui/oxide/skin.css';
+import 'tinymce/plugins/anchor';
 import 'tinymce/plugins/autoresize';
 import 'tinymce/plugins/autolink';
 import 'tinymce/plugins/charmap';
@@ -178,8 +179,8 @@ export default {
       isReady: false,
       isRichtextReady: false,
       isRichtextSourceVisible: false,
-      richtextConf: {},
       isTrackLink: false,
+      richtextConf: {},
       richTextSourceBody: '',
       form: {
         body: '',
@@ -209,6 +210,7 @@ export default {
 
         setup: (editor) => {
           editor.on('init', () => {
+            editor.focus();
             this.onEditorDialogOpen(editor);
           });
 
@@ -220,13 +222,14 @@ export default {
           });
         },
 
+        browser_spellcheck: true,
         min_height: 500,
         toolbar_sticky: true,
         entity_encoding: 'raw',
         convert_urls: true,
         plugins: [
-          'autoresize', 'autolink', 'charmap', 'emoticons', 'fullscreen', 'help',
-          'hr', 'image', 'imagetools', 'link', 'lists', 'paste', 'searchreplace',
+          'anchor', 'autoresize', 'autolink', 'charmap', 'emoticons', 'fullscreen',
+          'help', 'hr', 'image', 'imagetools', 'link', 'lists', 'paste', 'searchreplace',
           'table', 'visualblocks', 'visualchars', 'wordcount',
         ],
         toolbar: `undo redo | formatselect styleselect fontsizeselect |
@@ -258,6 +261,13 @@ export default {
     },
 
     onFormatChange(format) {
+      if (this.form.body.trim() === '') {
+        this.form.format = format;
+        this.onEditorChange();
+        return;
+      }
+
+      // Content isn't empty. Warn.
       this.$utils.confirm(
         this.$t('campaigns.confirmSwitchFormat'),
         () => {
@@ -373,7 +383,7 @@ export default {
 
     beautifyHTML(str) {
       // Pad all tags with linebreaks.
-      let s = this.trimLines(str.replace(/(<([^>]+)>)/ig, '\n$1\n'), true);
+      let s = this.trimLines(str.replace(/(<(?!(\/)?a|span)([^>]+)>)/ig, '\n$1\n'), true);
 
       // Remove extra linebreaks.
       s = s.replace(/\n+/g, '\n');
