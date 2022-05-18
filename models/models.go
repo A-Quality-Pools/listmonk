@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"regexp"
 	"strings"
+	txttpl "text/template"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -16,6 +17,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 	null "gopkg.in/volatiletech/null.v6"
 )
@@ -69,12 +71,24 @@ const (
 	EmailHeaderSubscriberUUID = "X-Listmonk-Subscriber"
 	EmailHeaderCampaignUUID   = "X-Listmonk-Campaign"
 
+	// Standard e-mail headers.
+	EmailHeaderDate        = "Date"
+	EmailHeaderFrom        = "From"
+	EmailHeaderSubject     = "Subject"
+	EmailHeaderMessageId   = "Message-Id"
+	EmailHeaderDeliveredTo = "Delivered-To"
+	EmailHeaderReceived    = "Received"
+
 	BounceTypeHard = "hard"
 	BounceTypeSoft = "soft"
 
 	TemplateTypeHTML = "html"
 	TemplateTypeMJML = "mjml"
 )
+
+// Headers represents an array of string maps used to represent SMTP, HTTP headers etc.
+// similar to url.Values{}
+type Headers []map[string]string
 
 // regTplFunc represents contains a regular expression for wrapping and
 // substituting a Go template function from the user's shorthand to a full
@@ -85,6 +99,14 @@ type regTplFunc struct {
 }
 
 var regTplFuncs = []regTplFunc{
+	// Regular expression for matching {{ TrackLink "http://link.com" }} in the template
+	// and substituting it with {{ Track "http://link.com" . }} (the dot context)
+	// before compilation. This is to make linking easier for users.
+	{
+		regExp:  regexp.MustCompile("{{(\\s+)?TrackLink(\\s+)?(.+?)(\\s+)?}}"),
+		replace: `{{ TrackLink $3 . }}`,
+	},
+
 	// Convert the shorthand https://google.com@TrackLink to {{ TrackLink ... }}.
 	// This is for WYSIWYG editors that encode and break quotes {{ "" }} when inserted
 	// inside <a href="{{ TrackLink "https://these-quotes-break" }}>.
@@ -93,13 +115,6 @@ var regTplFuncs = []regTplFunc{
 		replace: `{{ TrackLink "$1" . }}`,
 	},
 
-	// Regular expression for matching {{ TrackLink "http://link.com" }} in the template
-	// and substituting it with {{ Track "http://link.com" . }} (the dot context)
-	// before compilation. This is to make linking easier for users.
-	{
-		regExp:  regexp.MustCompile("{{(\\s+)?TrackLink\\s+?(\"|`)(.+?)(\"|`)(\\s+)?}}"),
-		replace: `{{ TrackLink "$3" . }}`,
-	},
 	{
 		regExp:  regexp.MustCompile(`{{(\s+)?(TrackView|UnsubscribeURL|OptinURL|MessageURL)(\s+)?}}`),
 		replace: `{{ $2 . }}`,
@@ -109,6 +124,16 @@ var regTplFuncs = []regTplFunc{
 // AdminNotifCallback is a callback function that's called
 // when a campaign's status changes.
 type AdminNotifCallback func(subject string, data interface{}) error
+
+// PageResults is a generic HTTP response container for paginated results of list of items.
+type PageResults struct {
+	Results interface{} `json:"results"`
+
+	Query   string `json:"query"`
+	Total   int    `json:"total"`
+	PerPage int    `json:"per_page"`
+	Page    int    `json:"page"`
+}
 
 // Base holds common fields shared across models.
 type Base struct {
@@ -133,8 +158,8 @@ type Subscriber struct {
 	Base
 
 	UUID    string            `db:"uuid" json:"uuid"`
-	Email   string            `db:"email" json:"email"`
-	Name    string            `db:"name" json:"name"`
+	Email   string            `db:"email" json:"email" form:"email"`
+	Name    string            `db:"name" json:"name" form:"name"`
 	Attribs SubscriberAttribs `db:"attribs" json:"attribs"`
 	Status  string            `db:"status" json:"status"`
 	Lists   types.JSONText    `db:"lists" json:"lists"`
@@ -144,8 +169,20 @@ type subLists struct {
 	Lists        types.JSONText `db:"lists"`
 }
 
+// SubscriberExportProfile represents a subscriber's collated data in JSON for export.
+type SubscriberExportProfile struct {
+	Email         string          `db:"email" json:"-"`
+	Profile       json.RawMessage `db:"profile" json:"profile,omitempty"`
+	Subscriptions json.RawMessage `db:"subscriptions" json:"subscriptions,omitempty"`
+	CampaignViews json.RawMessage `db:"campaign_views" json:"campaign_views,omitempty"`
+	LinkClicks    json.RawMessage `db:"link_clicks" json:"link_clicks,omitempty"`
+}
+
 // SubscriberAttribs is the map of key:value attributes of a subscriber.
 type SubscriberAttribs map[string]interface{}
+
+// StringIntMap is used to define DB Scan()s.
+type StringIntMap map[string]int
 
 // Subscribers represents a slice of Subscriber.
 type Subscribers []Subscriber
@@ -165,13 +202,14 @@ type SubscriberExport struct {
 type List struct {
 	Base
 
-	UUID            string         `db:"uuid" json:"uuid"`
-	Name            string         `db:"name" json:"name"`
-	Type            string         `db:"type" json:"type"`
-	Optin           string         `db:"optin" json:"optin"`
-	Tags            pq.StringArray `db:"tags" json:"tags"`
-	SubscriberCount int            `db:"subscriber_count" json:"subscriber_count"`
-	SubscriberID    int            `db:"subscriber_id" json:"-"`
+	UUID             string         `db:"uuid" json:"uuid"`
+	Name             string         `db:"name" json:"name"`
+	Type             string         `db:"type" json:"type"`
+	Optin            string         `db:"optin" json:"optin"`
+	Tags             pq.StringArray `db:"tags" json:"tags"`
+	SubscriberCount  int            `db:"-" json:"subscriber_count"`
+	SubscriberCounts StringIntMap   `db:"subscriber_statuses" json:"subscriber_statuses"`
+	SubscriberID     int            `db:"subscriber_id" json:"-"`
 
 	// This is only relevant when querying the lists of a subscriber.
 	SubscriptionStatus string `db:"subscription_status" json:"subscription_status,omitempty"`
@@ -197,6 +235,7 @@ type Campaign struct {
 	Status      string         `db:"status" json:"status"`
 	ContentType string         `db:"content_type" json:"content_type"`
 	Tags        pq.StringArray `db:"tags" json:"tags"`
+	Headers     Headers        `db:"headers" json:"headers"`
 	TemplateID  int            `db:"template_id" json:"template_id"`
 	Messenger   string         `db:"messenger" json:"messenger"`
 
@@ -204,7 +243,7 @@ type Campaign struct {
 	TemplateBody string             `db:"template_body" json:"-"`
 	TemplateType string             `db:"template_type" json:"-"`
 	Tpl          *template.Template `json:"-"`
-	SubjectTpl   *template.Template `json:"-"`
+	SubjectTpl   *txttpl.Template   `json:"-"`
 	AltBodyTpl   *template.Template `json:"-"`
 
 	// Pseudofield for getting the total number of subscribers
@@ -229,6 +268,28 @@ type CampaignMeta struct {
 	StartedAt null.Time `db:"started_at" json:"started_at"`
 	ToSend    int       `db:"to_send" json:"to_send"`
 	Sent      int       `db:"sent" json:"sent"`
+}
+
+type CampaignStats struct {
+	ID        int       `db:"id" json:"id"`
+	Status    string    `db:"status" json:"status"`
+	ToSend    int       `db:"to_send" json:"to_send"`
+	Sent      int       `db:"sent" json:"sent"`
+	Started   null.Time `db:"started_at" json:"started_at"`
+	UpdatedAt null.Time `db:"updated_at" json:"updated_at"`
+	Rate      int       `json:"rate"`
+	NetRate   int       `json:"net_rate"`
+}
+
+type CampaignAnalyticsCount struct {
+	CampaignID int       `db:"campaign_id" json:"campaign_id"`
+	Count      int       `db:"count" json:"count"`
+	Timestamp  time.Time `db:"timestamp" json:"timestamp"`
+}
+
+type CampaignAnalyticsLink struct {
+	URL   string `db:"url" json:"url"`
+	Count int    `db:"count" json:"count"`
 }
 
 // Campaigns represents a slice of Campaigns.
@@ -267,6 +328,9 @@ type Bounce struct {
 
 // markdown is a global instance of Markdown parser and renderer.
 var markdown = goldmark.New(
+	goldmark.WithParserOptions(
+		parser.WithAutoHeadingID(),
+	),
 	goldmark.WithRendererOptions(
 		html.WithXHTML(),
 		html.WithUnsafe(),
@@ -315,12 +379,30 @@ func (s SubscriberAttribs) Value() (driver.Value, error) {
 	return json.Marshal(s)
 }
 
-// Scan unmarshals JSON into SubscriberAttribs.
+// Scan unmarshals JSONB from the DB.
 func (s SubscriberAttribs) Scan(src interface{}) error {
+	if src == nil {
+		s = make(SubscriberAttribs)
+		return nil
+	}
+
 	if data, ok := src.([]byte); ok {
 		return json.Unmarshal(data, &s)
 	}
-	return fmt.Errorf("Could not not decode type %T -> %T", src, s)
+	return fmt.Errorf("could not not decode type %T -> %T", src, s)
+}
+
+// Scan unmarshals JSONB from the DB.
+func (s StringIntMap) Scan(src interface{}) error {
+	if src == nil {
+		s = make(StringIntMap)
+		return nil
+	}
+
+	if data, ok := src.([]byte); ok {
+		return json.Unmarshal(data, &s)
+	}
+	return fmt.Errorf("could not not decode type %T -> %T", src, s)
 }
 
 // GetIDs returns the list of campaign IDs.
@@ -384,6 +466,7 @@ func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 	for _, r := range regTplFuncs {
 		body = r.regExp.ReplaceAllString(body, r.replace)
 	}
+
 	msgTpl, err := template.New(ContentTpl).Funcs(f).Parse(body)
 	if err != nil {
 		return fmt.Errorf("error compiling message: %v", err)
@@ -401,7 +484,9 @@ func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 		for _, r := range regTplFuncs {
 			subj = r.regExp.ReplaceAllString(subj, r.replace)
 		}
-		subjTpl, err := template.New(ContentTpl).Funcs(f).Parse(subj)
+
+		var txtFuncs map[string]interface{} = f
+		subjTpl, err := txttpl.New(ContentTpl).Funcs(txtFuncs).Parse(subj)
 		if err != nil {
 			return fmt.Errorf("error compiling subject: %v", err)
 		}
@@ -473,4 +558,41 @@ func (s Subscriber) LastName() string {
 	}
 
 	return s.Name
+}
+
+// Scan implements the sql.Scanner interface.
+func (h *Headers) Scan(src interface{}) error {
+	var b []byte
+	switch src := src.(type) {
+	case []byte:
+		b = src
+	case string:
+		b = []byte(src)
+	case nil:
+		return nil
+	}
+
+	if err := json.Unmarshal(b, h); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Value implements the driver.Valuer interface.
+func (h Headers) Value() (driver.Value, error) {
+	if h == nil {
+		return nil, nil
+	}
+
+	if n := len(h); n > 0 {
+		b, err := json.Marshal(h)
+		if err != nil {
+			return nil, err
+		}
+
+		return b, nil
+	}
+
+	return "[]", nil
 }
